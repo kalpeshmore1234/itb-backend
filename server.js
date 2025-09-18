@@ -1,55 +1,130 @@
+// server.js
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
-import serverless from 'serverless-http';
 
-// Initialize app
-const app = express();
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// 1) init app first
+export const app = express();
+app.use(express.json());
 
-// CORS setup
+// 2) CORS (browser only; Postman ignores CORS)
 const allow = [
   'https://indiantravelbureau.myshopify.com',
   'https://indiantravelbureau.com',
-  'https://www.indiantravelbureau.com'
+  'https://www.indiantravelbureau.com',
 ];
 app.use(cors({
-  origin: function (origin, cb) {
-    if (!origin) return cb(null, true);       // server-to-server / Postman
-    return cb(null, allow.includes(origin));  // allow only your storefronts
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);        // server-to-server / Postman / curl
+    cb(null, allow.includes(origin) || origin.endsWith('.vercel.app')); // allow vercel previews too
   },
   methods: ['POST', 'GET', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
+  allowedHeaders: ['Content-Type'],
 }));
-
 app.options('*', (req, res) => res.sendStatus(204));
 
-// Shopify API setup
+// 3) Shopify endpoints
 const STORE = process.env.SHOPIFY_STORE;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
-const REST = `https://${STORE}.myshopify.com/admin/api/2024-07`;
-const GQL = `https://${STORE}.myshopify.com/admin/api/2024-07/graphql.json`;
+const REST  = `https://${STORE}.myshopify.com/admin/api/2024-07`;
+const GQL   = `https://${STORE}.myshopify.com/admin/api/2024-07/graphql.json`;
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  return res.json({ ok: true });  // Basic health check
-});
+// sanity logs
+console.log('🟢 Booting API');
+console.log('Store:', STORE);
+console.log('Token prefix:', TOKEN?.slice(0, 8), 'len:', TOKEN?.length);
 
-// Who am I? endpoint
+// Health  ✅ (mounted under /api for Vercel)
+app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+// Who am I? ✅ (mounted under /api for Vercel)
 app.get('/api/whoami', async (req, res) => {
   try {
     const r = await axios.get(`${REST}/shop.json`, {
-      headers: { 'X-Shopify-Access-Token': TOKEN }
+      headers: { 'X-Shopify-Access-Token': TOKEN },
     });
     res.json({ ok: true, shop: r.data.shop?.myshopify_domain });
   } catch (e) {
+    console.error('whoami error:', e.response?.status, e.response?.data || e.message);
     res.status(500).json({ ok: false, error: e.response?.data || e.message });
   }
 });
 
-// Main endpoint to handle leads
+function throwDetailed(e, label) {
+  const status = e.response?.status;
+  const body = e.response?.data;
+  console.error(`❌ ${label} failed`, status, body || e.message);
+  const err = new Error(label);
+  err._status = status || 500;
+  err._body = body || { message: e.message };
+  throw err;
+}
+
+async function findCustomerByEmail(email) {
+  try {
+    const r = await axios.get(`${REST}/customers/search.json`, {
+      params: { query: `email:${email}` },
+      headers: { 'X-Shopify-Access-Token': TOKEN },
+    });
+    return r.data.customers?.[0] || null;
+  } catch (e) { throwDetailed(e, 'customers/search'); }
+}
+
+async function createCustomer({ first_name, email, phone, note, tags }) {
+  try {
+    const r = await axios.post(`${REST}/customers.json`,
+      { customer: { first_name, email, phone, note, tags } },
+      { headers: { 'X-Shopify-Access-Token': TOKEN } }
+    );
+    return r.data.customer;
+  } catch (e) { throwDetailed(e, 'customers/create'); }
+}
+
+async function updateCustomerNote(id, note) {
+  try {
+    await axios.put(`${REST}/customers/${id}.json`,
+      { customer: { id, note } },
+      { headers: { 'X-Shopify-Access-Token': TOKEN } }
+    );
+  } catch (e) { throwDetailed(e, 'customers/update'); }
+}
+
+async function setCustomerMetafields(customerId, { product_title, product_price, customer_number }) {
+  const ownerId = `gid://shopify/Customer/${customerId}`;
+  const query = `
+    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        userErrors { field message }
+      }
+    }`;
+  const variables = {
+    metafields: [
+      { ownerId, namespace: 'custom', key: 'product_title',
+        type: 'single_line_text_field', value: String(product_title || '') },
+      { ownerId, namespace: 'custom', key: 'product_price',
+        type: 'single_line_text_field', value: String((product_price || '').toString().replace(/[^\d.]/g, '')) },
+      { ownerId, namespace: 'custom', key: 'customer_number',
+        type: 'single_line_text_field', value: String(customer_number || '') },
+    ],
+  };
+
+  try {
+    const r = await axios.post(GQL, { query, variables }, {
+      headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type': 'application/json' },
+    });
+    const errs = r.data?.data?.metafieldsSet?.userErrors || [];
+    if (errs.length) {
+      console.error('❌ metafieldsSet userErrors:', errs);
+      const err = new Error('metafieldsSet userErrors');
+      err._status = 422;
+      err._body = { userErrors: errs };
+      throw err;
+    }
+  } catch (e) { throwDetailed(e, 'metafieldsSet'); }
+}
+
+// Main endpoint (already under /api)
 app.post('/api/lead', async (req, res) => {
   try {
     const { name, email, phone, product_title, product_price, customer_number, note } = req.body;
@@ -60,14 +135,13 @@ app.post('/api/lead', async (req, res) => {
       email ? `Email: ${email}` : null,
       phone ? `Phone: ${phone}` : null,
       product_title ? `Product: ${product_title}` : null,
-      product_price ? `Price: ${product_price}` : null
+      product_price ? `Price: ${product_price}` : null,
     ].filter(Boolean).join(', ');
 
-    // Logic for finding, creating, or updating customer
     let customer = await findCustomerByEmail(email);
     if (!customer) {
       customer = await createCustomer({
-        first_name: name || '', email, phone, note: note || adminNote, tags: 'query-form'
+        first_name: name || '', email, phone, note: note || adminNote, tags: 'query-form',
       });
     } else {
       await updateCustomerNote(customer.id, note || adminNote);
@@ -76,7 +150,7 @@ app.post('/api/lead', async (req, res) => {
     await setCustomerMetafields(customer.id, {
       product_title,
       product_price,
-      customer_number: customer_number || phone || ''
+      customer_number: customer_number || phone || '',
     });
 
     res.json({ ok: true, customer_id: customer.id });
@@ -85,5 +159,11 @@ app.post('/api/lead', async (req, res) => {
   }
 });
 
-// Export the app as a serverless function
-export default serverless(app);
+// 404 fallback so unknown paths don't hang
+app.use((req, res) => res.status(404).json({ ok: false, error: 'not_found' }));
+
+// 4) only listen locally; Vercel will wrap the app
+if (process.env.VERCEL !== '1') {
+  app.listen(process.env.PORT || 3000, () => console.log('✅ API listening'));
+}
+
