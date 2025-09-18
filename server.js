@@ -12,15 +12,15 @@ app.use(express.json());
 const allow = [
   'https://indiantravelbureau.myshopify.com',
   'https://indiantravelbureau.com',
-  'https://www.indiantravelbureau.com'
+  'https://www.indiantravelbureau.com',
 ];
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);       // server-to-server / Postman
-    cb(null, allow.includes(origin));         // allow only your storefronts
+    if (!origin) return cb(null, true);        // server-to-server / Postman / curl
+    cb(null, allow.includes(origin) || origin.endsWith('.vercel.app')); // allow vercel previews too
   },
-  methods: ['POST','GET','OPTIONS'],
-  allowedHeaders: ['Content-Type']
+  methods: ['POST', 'GET', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
 }));
 app.options('*', (req, res) => res.sendStatus(204));
 
@@ -35,14 +35,14 @@ console.log('🟢 Booting API');
 console.log('Store:', STORE);
 console.log('Token prefix:', TOKEN?.slice(0, 8), 'len:', TOKEN?.length);
 
-// Health
-app.get('/health', (req, res) => res.json({ ok: true }));
+// Health  ✅ (mounted under /api for Vercel)
+app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-// Who am I?
-app.get('/whoami', async (req, res) => {
+// Who am I? ✅ (mounted under /api for Vercel)
+app.get('/api/whoami', async (req, res) => {
   try {
     const r = await axios.get(`${REST}/shop.json`, {
-      headers: { 'X-Shopify-Access-Token': TOKEN }
+      headers: { 'X-Shopify-Access-Token': TOKEN },
     });
     res.json({ ok: true, shop: r.data.shop?.myshopify_domain });
   } catch (e) {
@@ -65,7 +65,7 @@ async function findCustomerByEmail(email) {
   try {
     const r = await axios.get(`${REST}/customers/search.json`, {
       params: { query: `email:${email}` },
-      headers: { 'X-Shopify-Access-Token': TOKEN }
+      headers: { 'X-Shopify-Access-Token': TOKEN },
     });
     return r.data.customers?.[0] || null;
   } catch (e) { throwDetailed(e, 'customers/search'); }
@@ -111,7 +111,7 @@ async function setCustomerMetafields(customerId, { product_title, product_price,
 
   try {
     const r = await axios.post(GQL, { query, variables }, {
-      headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type': 'application/json' }
+      headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type': 'application/json' },
     });
     const errs = r.data?.data?.metafieldsSet?.userErrors || [];
     if (errs.length) {
@@ -124,7 +124,7 @@ async function setCustomerMetafields(customerId, { product_title, product_price,
   } catch (e) { throwDetailed(e, 'metafieldsSet'); }
 }
 
-// Main endpoint
+// Main endpoint (already under /api)
 app.post('/api/lead', async (req, res) => {
   try {
     const { name, email, phone, product_title, product_price, customer_number, note } = req.body;
@@ -135,13 +135,13 @@ app.post('/api/lead', async (req, res) => {
       email ? `Email: ${email}` : null,
       phone ? `Phone: ${phone}` : null,
       product_title ? `Product: ${product_title}` : null,
-      product_price ? `Price: ${product_price}` : null
+      product_price ? `Price: ${product_price}` : null,
     ].filter(Boolean).join(', ');
 
     let customer = await findCustomerByEmail(email);
     if (!customer) {
       customer = await createCustomer({
-        first_name: name || '', email, phone, note: note || adminNote, tags: 'query-form'
+        first_name: name || '', email, phone, note: note || adminNote, tags: 'query-form',
       });
     } else {
       await updateCustomerNote(customer.id, note || adminNote);
@@ -150,7 +150,7 @@ app.post('/api/lead', async (req, res) => {
     await setCustomerMetafields(customer.id, {
       product_title,
       product_price,
-      customer_number: customer_number || phone || ''
+      customer_number: customer_number || phone || '',
     });
 
     res.json({ ok: true, customer_id: customer.id });
@@ -159,7 +159,11 @@ app.post('/api/lead', async (req, res) => {
   }
 });
 
+// 404 fallback so unknown paths don't hang
+app.use((req, res) => res.status(404).json({ ok: false, error: 'not_found' }));
+
 // 4) only listen locally; Vercel will wrap the app
 if (process.env.VERCEL !== '1') {
   app.listen(process.env.PORT || 3000, () => console.log('✅ API listening'));
 }
+
