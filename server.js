@@ -4,41 +4,37 @@ import axios from 'axios';
 import cors from 'cors';
 import serverless from 'serverless-http';
 
-// Initialize the app
+// Initialize app
 const app = express();
 app.use(express.json());
 
-// CORS configuration
+// CORS setup
 const allow = [
   'https://indiantravelbureau.myshopify.com',
   'https://indiantravelbureau.com',
   'https://www.indiantravelbureau.com'
 ];
 app.use(cors({
-  origin(origin, cb) {
-    if (!origin) return cb(null, true);       // allow server-to-server / Postman
-    cb(null, allow.includes(origin));         // allow only your storefronts
+  origin: function (origin, cb) {
+    if (!origin) return cb(null, true);       // server-to-server / Postman
+    return cb(null, allow.includes(origin));  // allow only your storefronts
   },
   methods: ['POST','GET','OPTIONS'],
   allowedHeaders: ['Content-Type']
 }));
+
 app.options('*', (req, res) => res.sendStatus(204));
 
-// Shopify API variables
+// Shopify API setup
 const STORE = process.env.SHOPIFY_STORE;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const REST  = `https://${STORE}.myshopify.com/admin/api/2024-07`;
 const GQL   = `https://${STORE}.myshopify.com/admin/api/2024-07/graphql.json`;
 
-// Log for debugging
-console.log('🟢 Booting API');
-console.log('Store:', STORE);
-console.log('Token prefix:', TOKEN?.slice(0, 8), 'len:', TOKEN?.length);
-
-// Health endpoint
+// Health check endpoint
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Who am I endpoint
+// Who am I? endpoint
 app.get('/whoami', async (req, res) => {
   try {
     const r = await axios.get(`${REST}/shop.json`, {
@@ -46,14 +42,11 @@ app.get('/whoami', async (req, res) => {
     });
     res.json({ ok: true, shop: r.data.shop?.myshopify_domain });
   } catch (e) {
-    console.error('whoami error:', e.response?.status, e.response?.data || e.message);
     res.status(500).json({ ok: false, error: e.response?.data || e.message });
   }
 });
 
-// Define your helper functions here...
-
-// Main endpoint
+// Main endpoint to handle leads
 app.post('/api/lead', async (req, res) => {
   try {
     const { name, email, phone, product_title, product_price, customer_number, note } = req.body;
@@ -67,6 +60,7 @@ app.post('/api/lead', async (req, res) => {
       product_price ? `Price: ${product_price}` : null
     ].filter(Boolean).join(', ');
 
+    // Logic for finding, creating, or updating customer
     let customer = await findCustomerByEmail(email);
     if (!customer) {
       customer = await createCustomer({
@@ -88,5 +82,5 @@ app.post('/api/lead', async (req, res) => {
   }
 });
 
-// Export the app for serverless
+// Export the app as a serverless function
 export default serverless(app);
