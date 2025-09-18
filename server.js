@@ -20,7 +20,7 @@ app.use(cors({
     if (!origin) return cb(null, true);       // server-to-server / Postman
     return cb(null, allow.includes(origin));  // allow only your storefronts
   },
-  methods: ['POST','GET','OPTIONS'],
+  methods: ['POST', 'GET', 'OPTIONS'],
   allowedHeaders: ['Content-Type']
 }));
 
@@ -29,12 +29,24 @@ app.options('*', (req, res) => res.sendStatus(204));
 // Shopify API setup
 const STORE = process.env.SHOPIFY_STORE;
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
-const REST  = `https://${STORE}.myshopify.com/admin/api/2024-07`;
-const GQL   = `https://${STORE}.myshopify.com/admin/api/2024-07/graphql.json`;
+const REST = `https://${STORE}.myshopify.com/admin/api/2024-07`;
+const GQL = `https://${STORE}.myshopify.com/admin/api/2024-07/graphql.json`;
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   return res.json({ ok: true });  // Basic health check
+});
+
+// Who am I? endpoint
+app.get('/api/whoami', async (req, res) => {
+  try {
+    const r = await axios.get(`${REST}/shop.json`, {
+      headers: { 'X-Shopify-Access-Token': TOKEN }
+    });
+    res.json({ ok: true, shop: r.data.shop?.myshopify_domain });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.response?.data || e.message });
+  }
 });
 
 // Main endpoint to handle leads
@@ -51,6 +63,7 @@ app.post('/api/lead', async (req, res) => {
       product_price ? `Price: ${product_price}` : null
     ].filter(Boolean).join(', ');
 
+    // Logic for finding, creating, or updating customer
     let customer = await findCustomerByEmail(email);
     if (!customer) {
       customer = await createCustomer({
