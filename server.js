@@ -6,7 +6,8 @@ import serverless from 'serverless-http';
 
 // Initialize app
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // CORS setup
 const allow = [
@@ -32,18 +33,8 @@ const REST  = `https://${STORE}.myshopify.com/admin/api/2024-07`;
 const GQL   = `https://${STORE}.myshopify.com/admin/api/2024-07/graphql.json`;
 
 // Health check endpoint
-app.get('/health', (req, res) => res.json({ ok: true }));
-
-// Who am I? endpoint
-app.get('/whoami', async (req, res) => {
-  try {
-    const r = await axios.get(`${REST}/shop.json`, {
-      headers: { 'X-Shopify-Access-Token': TOKEN }
-    });
-    res.json({ ok: true, shop: r.data.shop?.myshopify_domain });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.response?.data || e.message });
-  }
+app.get('/api/health', (req, res) => {
+  return res.json({ ok: true });  // Basic health check
 });
 
 // Main endpoint to handle leads
@@ -60,7 +51,6 @@ app.post('/api/lead', async (req, res) => {
       product_price ? `Price: ${product_price}` : null
     ].filter(Boolean).join(', ');
 
-    // Logic for finding, creating, or updating customer
     let customer = await findCustomerByEmail(email);
     if (!customer) {
       customer = await createCustomer({
